@@ -1,0 +1,2 @@
+# PyTorch is supplied by the release's CUDA 13 / SM86 wheel.
+-r requirements-projectswift.in

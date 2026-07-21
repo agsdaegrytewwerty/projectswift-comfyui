@@ -1,0 +1,26 @@
+{
+  "4to5": [
+    "CFGGuider", "CLIPTextEncode", "CheckpointLoaderSimple", "DisableNoise",
+    "KSamplerSelect", "KarrasScheduler", "ProjectSwiftLatentLoader",
+    "SamplerCustomAdvanced", "SaveImage", "SplitSigmas", "StringConcatenate",
+    "VAEDecode"
+  ],
+  "Matte": [
+    "CFGGuider", "CLIPTextEncode", "CheckpointLoaderSimple", "ImageBlur",
+    "ImageScale", "ImageToMask", "KSamplerSelect", "KarrasScheduler",
+    "LoadImage", "MaskToImage", "PreviewImage", "RandomNoise",
+    "SamplerCustomAdvanced", "SaveImage", "VAEDecode", "VAEEncodeForInpaint"
+  ],
+  "scratch": [
+    "CFGGuider", "CLIPTextEncode", "CheckpointLoaderSimple", "DisableNoise",
+    "EmptyLatentImage", "KSamplerSelect", "KarrasScheduler", "RandomNoise",
+    "SamplerCustomAdvanced", "SaveAnimatedWEBP", "SaveLatent", "SplitSigmas",
+    "StringConcatenate", "VAEDecode"
+  ],
+  "standard": [
+    "CFGGuider", "CLIPTextEncode", "CheckpointLoaderSimple", "ImageScale",
+    "KSamplerSelect", "KarrasScheduler", "LatentUpscaleBy", "LoadImage",
+    "PreviewImage", "RandomNoise", "SamplerCustomAdvanced", "SaveImage",
+    "SplitSigmas", "VAEDecode", "VAEDecodeTiled", "VAEEncode"
+  ]
+}

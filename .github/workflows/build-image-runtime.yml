@@ -1,0 +1,235 @@
+name: Build ProjectSwift image runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: projectswift-image-runtime-v1
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      RELEASE_TAG: v1.0.0
+      UPSTREAM_COMFY_COMMIT: 78b43d25003ecf3c2b2509259d3a3cc72e941ec8
+      PYTORCH_TAG: v2.10.0
+      PYTORCH_VERSION: 2.10.0+cu130.sm86.projectswift1
+      BUILDER_IMAGE: pytorch/manylinux2_28-builder:cuda13.0-v2.10.0-rc7@sha256:e918d171dc8d1bf5ae5699ddef048d97e2e280fbfb825eb6b2be58d32c5c91b2
+      OFFICIAL_TORCH_URL: https://download.pytorch.org/whl/cu130/torch-2.10.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl
+      UPSTREAM_SOURCE_TAR_BYTES: "11654597"
+      MINIMUM_SAVING_BYTES: "104857600"
+    steps:
+      - name: Check out lean fork
+        uses: actions/checkout@v4
+
+      - name: Set up CPython 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Reclaim runner disk and install packaging tools
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils ca-certificates git patchelf zstd
+          sudo rm -rf /var/lib/apt/lists/*
+          df -h
+
+      - name: Clone pinned PyTorch recursively
+        run: |
+          set -euxo pipefail
+          git clone \
+            --depth 1 \
+            --branch "${PYTORCH_TAG}" \
+            --recurse-submodules \
+            --shallow-submodules \
+            https://github.com/pytorch/pytorch.git \
+            "${RUNNER_TEMP}/pytorch"
+          git -C "${RUNNER_TEMP}/pytorch" rev-parse HEAD | tee "${RUNNER_TEMP}/pytorch-commit"
+
+      - name: Build CUDA 13 SM86-only PyTorch wheel
+        run: |
+          set -euxo pipefail
+          mkdir -p "${RUNNER_TEMP}/torch-output"
+          docker pull "${BUILDER_IMAGE}"
+          docker run --rm --shm-size=2g \
+            -v "${RUNNER_TEMP}/pytorch:/pytorch" \
+            -v "${RUNNER_TEMP}/torch-output:/output" \
+            -e BUILD_TEST=0 \
+            -e DESIRED_CUDA=13.0 \
+            -e DESIRED_PYTHON=cp312-cp312 \
+            -e DISABLE_RCCL=1 \
+            -e GPU_ARCH_TYPE=cuda \
+            -e MAX_JOBS=2 \
+            -e OVERRIDE_PACKAGE_VERSION="${PYTORCH_VERSION}" \
+            -e PACKAGE_TYPE=manywheel \
+            -e PYTORCH_BUILD_NUMBER=0 \
+            -e PYTORCH_BUILD_VERSION="${PYTORCH_VERSION}" \
+            -e PYTORCH_FINAL_PACKAGE_DIR=/output \
+            -e PYTORCH_ROOT=/pytorch \
+            -e USE_DISTRIBUTED=0 \
+            -e USE_FBGEMM=0 \
+            -e USE_GLOO=0 \
+            -e USE_KINETO=0 \
+            -e USE_MPI=0 \
+            -e USE_NCCL=0 \
+            "${BUILDER_IMAGE}" \
+            bash -lc '
+              set -euxo pipefail
+              git config --global --add safe.directory /pytorch
+              sed -i "/^    13\\.0)/,/^        ;;/ s|^        TORCH_CUDA_ARCH_LIST=.*|        TORCH_CUDA_ARCH_LIST=\"8.6\"|" /pytorch/.ci/manywheel/build_cuda.sh
+              sed -i "s/export BUILD_BUNDLE_PTXAS=1/export BUILD_BUNDLE_PTXAS=0/" /pytorch/.ci/manywheel/build_cuda.sh
+              grep -A4 "13.0)" /pytorch/.ci/manywheel/build_cuda.sh
+              cd /pytorch
+              bash .ci/manywheel/build.sh
+            '
+          find "${RUNNER_TEMP}/torch-output" -maxdepth 1 -type f -name '*.whl' -print
+          test "$(find "${RUNNER_TEMP}/torch-output" -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+
+      - name: Install and validate the custom wheel
+        run: |
+          set -euxo pipefail
+          torch_wheel="$(find "${RUNNER_TEMP}/torch-output" -maxdepth 1 -type f -name '*.whl')"
+          python -m venv "${RUNNER_TEMP}/build-venv"
+          "${RUNNER_TEMP}/build-venv/bin/python" -m pip install --upgrade pip
+          "${RUNNER_TEMP}/build-venv/bin/python" -m pip install "${torch_wheel}"
+          "${RUNNER_TEMP}/build-venv/bin/python" -m pip install -r requirements-projectswift.in
+          "${RUNNER_TEMP}/build-venv/bin/python" scripts/verify_torch_build.py
+
+      - name: Lock and download the complete wheelhouse
+        run: |
+          set -euxo pipefail
+          mkdir -p build/wheelhouse
+          cp "${RUNNER_TEMP}/torch-output/"*.whl build/wheelhouse/
+          "${RUNNER_TEMP}/build-venv/bin/python" - <<'PY' > build/requirements-projectswift.lock
+          import json
+          import subprocess
+          import sys
+
+          payload = json.loads(subprocess.check_output(
+              [sys.executable, "-m", "pip", "list", "--format=json"], text=True
+          ))
+          excluded = {"pip", "setuptools", "wheel"}
+          for item in sorted(payload, key=lambda value: value["name"].lower()):
+              if item["name"].lower() not in excluded:
+                  print(f"{item['name']}=={item['version']}")
+          PY
+          "${RUNNER_TEMP}/build-venv/bin/python" -m pip download \
+            --only-binary=:all: \
+            --dest build/wheelhouse \
+            --find-links build/wheelhouse \
+            -r build/requirements-projectswift.lock
+          "${RUNNER_TEMP}/build-venv/bin/python" scripts/release_metadata.py inventory build/inventory
+
+      - name: Build lean source and runtime archives
+        run: |
+          set -euxo pipefail
+          stage="build/stage/projectswift-comfyui-runtime-${RELEASE_TAG}"
+          mkdir -p "$stage" dist
+          python scripts/package_lean_source.py . "$stage/comfyui"
+          cp build/requirements-projectswift.lock "$stage/requirements-projectswift.lock"
+          cp -a build/wheelhouse "$stage/wheelhouse"
+          cp build/inventory/license-inventory.json "$stage/license-inventory.json"
+          cp build/inventory/sbom.cdx.json "$stage/sbom.cdx.json"
+          cp build/inventory/license-inventory.json dist/license-inventory.json
+          cp build/inventory/sbom.cdx.json dist/sbom.cdx.json
+          cp "${RUNNER_TEMP}/torch-output/"*.whl dist/
+
+          source_asset="projectswift-comfyui-image-source-${RELEASE_TAG}.tar.zst"
+          runtime_asset="projectswift-comfyui-image-py312-cu130-sm86-${RELEASE_TAG}.tar.zst"
+          tar --zstd -cf "dist/${source_asset}" -C "$stage" comfyui
+          tar --zstd -cf "dist/${runtime_asset}" -C build/stage "projectswift-comfyui-runtime-${RELEASE_TAG}"
+          echo "SOURCE_ASSET=${source_asset}" >> "$GITHUB_ENV"
+          echo "RUNTIME_ASSET=${runtime_asset}" >> "$GITHUB_ENV"
+
+      - name: Verify bundle with network-free installation
+        run: |
+          set -euxo pipefail
+          bundle_root="build/stage/projectswift-comfyui-runtime-${RELEASE_TAG}"
+          python -m venv "${RUNNER_TEMP}/verify-venv"
+          "${RUNNER_TEMP}/verify-venv/bin/python" -m pip install \
+            --no-index \
+            --find-links "$bundle_root/wheelhouse" \
+            -r "$bundle_root/requirements-projectswift.lock"
+          "${RUNNER_TEMP}/verify-venv/bin/python" "$bundle_root/comfyui/scripts/verify_lean_runtime.py"
+          "${RUNNER_TEMP}/verify-venv/bin/python" "$bundle_root/comfyui/main.py" \
+            --cpu --quick-test-for-ci --disable-api-nodes --disable-metadata \
+            --front-end-root "$bundle_root/comfyui/web_empty"
+
+      - name: Measure the current filtered baseline
+        run: |
+          set -euxo pipefail
+          mkdir -p build/baseline-wheelhouse
+          python -m pip download \
+            --only-binary=:all: \
+            --dest build/baseline-wheelhouse \
+            "torch @ ${OFFICIAL_TORCH_URL}" \
+            -r requirements-baseline.in
+          baseline_wheels="$(find build/baseline-wheelhouse -type f -printf '%s\n' | awk '{sum += $1} END {print sum + 0}')"
+          baseline_bytes="$((baseline_wheels + UPSTREAM_SOURCE_TAR_BYTES))"
+          runtime_bytes="$(stat -c '%s' "dist/${RUNTIME_ASSET}")"
+          saved_bytes="$((baseline_bytes - runtime_bytes))"
+          echo "Baseline bytes: ${baseline_bytes}"
+          echo "Runtime bytes: ${runtime_bytes}"
+          echo "Saved bytes: ${saved_bytes}"
+          test "$saved_bytes" -ge "$MINIMUM_SAVING_BYTES"
+          echo "BASELINE_BYTES=${baseline_bytes}" >> "$GITHUB_ENV"
+          echo "RUNTIME_BYTES=${runtime_bytes}" >> "$GITHUB_ENV"
+          echo "SAVED_BYTES=${saved_bytes}" >> "$GITHUB_ENV"
+          rm -rf build/baseline-wheelhouse
+
+      - name: Finalize manifest, checksums, and release notes
+        run: |
+          set -euxo pipefail
+          pytorch_commit="$(cat "${RUNNER_TEMP}/pytorch-commit")"
+          fork_commit="$(git rev-parse HEAD)"
+          python scripts/release_metadata.py finalize \
+            --dist dist \
+            --lock build/requirements-projectswift.lock \
+            --release "$RELEASE_TAG" \
+            --upstream-commit "$UPSTREAM_COMFY_COMMIT" \
+            --fork-commit "$fork_commit" \
+            --pytorch-commit "$pytorch_commit" \
+            --pytorch-version "$PYTORCH_VERSION" \
+            --builder-image "$BUILDER_IMAGE" \
+            --baseline-bytes "$BASELINE_BYTES" \
+            --runtime-bytes "$RUNTIME_BYTES"
+          cat dist/release-notes.md >> "$GITHUB_STEP_SUMMARY"
+          find dist -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+          while IFS= read -r -d '' asset; do
+            test "$(stat -c '%s' "$asset")" -lt 2147483648
+          done < <(find dist -maxdepth 1 -type f -print0)
+
+      - name: Upload diagnostic workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: projectswift-image-runtime-metadata
+          path: |
+            dist/manifest.json
+            dist/SHA256SUMS
+            dist/release-notes.md
+            dist/license-inventory.json
+            dist/sbom.cdx.json
+
+      - name: Publish immutable release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ProjectSwift lean ComfyUI ${{ env.RELEASE_TAG }}
+          body_path: dist/release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.whl
+            dist/*.tar.zst
+            dist/manifest.json
+            dist/SHA256SUMS
+            dist/license-inventory.json
+            dist/sbom.cdx.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,14 @@
+# Minimal top-level dependencies for ProjectSwift's SDXL image workflows.
+numpy>=1.25.0
+einops
+transformers>=4.50.3
+tokenizers>=0.13.3
+safetensors>=0.4.2
+aiohttp>=3.11.8
+yarl>=1.18.0
+pyyaml
+Pillow
+tqdm
+psutil
+comfy-aimdo==0.4.10
+zstandard==0.23.0
