@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 import torch
+import torch.nn.functional as F
 
 
 EXPECTED_VERSION = "2.10.0+cu130.sm86.projectswift1"
@@ -16,6 +17,19 @@ if torch.version.cuda != "13.0":
 architectures = torch.cuda.get_arch_list()
 if architectures != ["sm_86"]:
     raise SystemExit(f"wheel is not SM86-only: {architectures}")
+if not torch.backends.mkldnn.is_available():
+    raise SystemExit("MKLDNN CPU backend is unavailable")
+if not torch.backends.cuda.is_flash_attention_available():
+    raise SystemExit("CUDA flash-attention backend is unavailable")
+if torch.backends.cudnn.version() is None:
+    raise SystemExit("cuDNN is unavailable")
+
+# Exercise CPU fallback and the framework SDPA path without requiring a GPU.
+left = torch.randn(8, 8)
+right = torch.randn(8, 8)
+torch.mm(left, right)
+query = torch.randn(1, 1, 4, 8)
+F.scaled_dot_product_attention(query, query, query)
 
 torch_root = Path(torch.__file__).resolve().parent
 missing = []
