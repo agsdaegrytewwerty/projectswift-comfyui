@@ -14,7 +14,8 @@ if torch.__version__ != EXPECTED_VERSION:
     raise SystemExit(f"unexpected torch version: {torch.__version__}")
 if torch.version.cuda != "13.0":
     raise SystemExit(f"unexpected CUDA version: {torch.version.cuda}")
-architectures = torch.cuda.get_arch_list()
+compiled_arch_flags = torch._C._cuda_getArchFlags()
+architectures = compiled_arch_flags.split() if compiled_arch_flags else []
 if architectures != ["sm_86"]:
     raise SystemExit(f"wheel is not SM86-only: {architectures}")
 if not torch.backends.mkldnn.is_available():
