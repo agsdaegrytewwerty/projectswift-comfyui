@@ -189,7 +189,10 @@ jobs:
             -r requirements-cuda13-runtime.in
           "${RUNNER_TEMP}/build-venv/bin/python" -m pip install "${torch_wheel}"
           "${RUNNER_TEMP}/build-venv/bin/python" -m pip install -r requirements-projectswift.in
-          "${RUNNER_TEMP}/build-venv/bin/python" scripts/verify_torch_build.py
+          cuda_lib_dir="$("${RUNNER_TEMP}/build-venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"] + "/nvidia/cu13/lib")')"
+          test -f "${cuda_lib_dir}/libcusparse.so.12"
+          LD_LIBRARY_PATH="${cuda_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+            "${RUNNER_TEMP}/build-venv/bin/python" scripts/verify_torch_build.py
 
       - name: Lock and download the complete wheelhouse
         run: |
@@ -249,6 +252,9 @@ jobs:
             --no-deps \
             --find-links "$bundle_root/wheelhouse" \
             -r "$bundle_root/requirements-projectswift.lock"
+          cuda_lib_dir="$("${RUNNER_TEMP}/verify-venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"] + "/nvidia/cu13/lib")')"
+          test -f "${cuda_lib_dir}/libcusparse.so.12"
+          export LD_LIBRARY_PATH="${cuda_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           "${RUNNER_TEMP}/verify-venv/bin/python" "$bundle_root/comfyui/scripts/verify_lean_runtime.py"
           "${RUNNER_TEMP}/verify-venv/bin/python" "$bundle_root/comfyui/main.py" \
             --cpu --quick-test-for-ci --disable-api-nodes --disable-metadata \
