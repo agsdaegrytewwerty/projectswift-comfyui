@@ -10,19 +10,20 @@ concurrency:
   group: projectswift-image-runtime-v1
   cancel-in-progress: false
 
+env:
+  RELEASE_TAG: v1.0.0
+  UPSTREAM_COMFY_COMMIT: 78b43d25003ecf3c2b2509259d3a3cc72e941ec8
+  PYTORCH_TAG: v2.10.0
+  PYTORCH_VERSION: 2.10.0+cu130.sm86.projectswift1
+  BUILDER_IMAGE: pytorch/manylinux2_28-builder:cuda13.0-v2.10.0-rc7@sha256:e918d171dc8d1bf5ae5699ddef048d97e2e280fbfb825eb6b2be58d32c5c91b2
+  OFFICIAL_TORCH_URL: https://download.pytorch.org/whl/cu130/torch-2.10.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl
+  UPSTREAM_SOURCE_TAR_BYTES: "11654597"
+  MINIMUM_SAVING_BYTES: "104857600"
+
 jobs:
-  build-release:
+  build-wheel:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
-    env:
-      RELEASE_TAG: v1.0.0
-      UPSTREAM_COMFY_COMMIT: 78b43d25003ecf3c2b2509259d3a3cc72e941ec8
-      PYTORCH_TAG: v2.10.0
-      PYTORCH_VERSION: 2.10.0+cu130.sm86.projectswift1
-      BUILDER_IMAGE: pytorch/manylinux2_28-builder:cuda13.0-v2.10.0-rc7@sha256:e918d171dc8d1bf5ae5699ddef048d97e2e280fbfb825eb6b2be58d32c5c91b2
-      OFFICIAL_TORCH_URL: https://download.pytorch.org/whl/cu130/torch-2.10.0%2Bcu130-cp312-cp312-manylinux_2_28_x86_64.whl
-      UPSTREAM_SOURCE_TAR_BYTES: "11654597"
-      MINIMUM_SAVING_BYTES: "104857600"
     steps:
       - name: Check out lean fork
         uses: actions/checkout@v4
@@ -51,7 +52,8 @@ jobs:
             --shallow-submodules \
             https://github.com/pytorch/pytorch.git \
             "${RUNNER_TEMP}/pytorch"
-          git -C "${RUNNER_TEMP}/pytorch" rev-parse HEAD | tee "${RUNNER_TEMP}/pytorch-commit"
+          mkdir -p "${RUNNER_TEMP}/torch-output"
+          git -C "${RUNNER_TEMP}/pytorch" rev-parse HEAD | tee "${RUNNER_TEMP}/torch-output/pytorch-commit"
 
       - name: Build CUDA 13 SM86-only PyTorch wheel
         run: |
@@ -110,13 +112,52 @@ jobs:
                 -e "/^[[:space:]]*\"libnl-3\\.so\\.200\"/d" \
                 -e "s|^[[:space:]]*\"libnl-route-3.so.200\")|            )|" \
                 /pytorch/.ci/manywheel/build_cuda.sh
+              # The v2.10 script's duplicate post-build self-test assumes an
+              # obsolete CPython path in this immutable builder image. The
+              # wheel is validated from a clean venv in assemble-release.
+              sed -i "/# remove stuff before testing/i exit 0" /pytorch/.ci/manywheel/build_common.sh
               bash -n /pytorch/.ci/manywheel/build_cuda.sh
+              bash -n /pytorch/.ci/manywheel/build_common.sh
               grep -A4 "13.0)" /pytorch/.ci/manywheel/build_cuda.sh
               cd /pytorch
               bash .ci/manywheel/build.sh
             '
           find "${RUNNER_TEMP}/torch-output" -maxdepth 1 -type f -name '*.whl' -print
           test "$(find "${RUNNER_TEMP}/torch-output" -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+
+      - name: Checkpoint the compiled wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: projectswift-sm86-wheel-${{ github.sha }}
+          path: ${{ runner.temp }}/torch-output
+          compression-level: 0
+          if-no-files-found: error
+
+  assemble-release:
+    needs: build-wheel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out lean fork
+        uses: actions/checkout@v4
+
+      - name: Set up CPython 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime packaging tools
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils ca-certificates patchelf zstd
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Restore the compiled wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: projectswift-sm86-wheel-${{ github.sha }}
+          path: ${{ runner.temp }}/torch-output
 
       - name: Install and validate the custom wheel
         run: |
@@ -213,7 +254,7 @@ jobs:
       - name: Finalize manifest, checksums, and release notes
         run: |
           set -euxo pipefail
-          pytorch_commit="$(cat "${RUNNER_TEMP}/pytorch-commit")"
+          pytorch_commit="$(cat "${RUNNER_TEMP}/torch-output/pytorch-commit")"
           fork_commit="$(git rev-parse HEAD)"
           python scripts/release_metadata.py finalize \
             --dist dist \
