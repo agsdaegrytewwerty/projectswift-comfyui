@@ -112,7 +112,7 @@ jobs:
                 -e "/^[[:space:]]*\"libnl-3\\.so\\.200\"/d" \
                 -e "s|^[[:space:]]*\"libnl-route-3.so.200\")|            )|" \
                 /pytorch/.ci/manywheel/build_cuda.sh
-              # The v2.10 script's duplicate post-build self-test assumes an
+              # The v2.10 duplicate post-build self-test assumes an
               # obsolete CPython path in this immutable builder image. The
               # wheel is validated from a clean venv in assemble-release.
               sed -i "/# remove stuff before testing/i exit 0" /pytorch/.ci/manywheel/build_common.sh
