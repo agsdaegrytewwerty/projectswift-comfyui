@@ -2,8 +2,20 @@ name: Build ProjectSwift image runtime
 
 on:
   workflow_dispatch:
+    inputs:
+      reuse_run_id:
+        description: Completed workflow run containing a compiled wheel artifact
+        required: false
+        default: ""
+        type: string
+      reuse_artifact_name:
+        description: Compiled wheel artifact name from the reused run
+        required: false
+        default: ""
+        type: string
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -11,6 +23,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  PIP_NO_CACHE_DIR: "1"
   RELEASE_TAG: v1.0.0
   UPSTREAM_COMFY_COMMIT: 78b43d25003ecf3c2b2509259d3a3cc72e941ec8
   PYTORCH_TAG: v2.10.0
@@ -22,6 +35,7 @@ env:
 
 jobs:
   build-wheel:
+    if: ${{ inputs.reuse_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
@@ -135,6 +149,7 @@ jobs:
 
   assemble-release:
     needs: build-wheel
+    if: ${{ always() && (needs.build-wheel.result == 'success' || inputs.reuse_run_id != '') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -149,15 +164,19 @@ jobs:
       - name: Install runtime packaging tools
         run: |
           set -euxo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binutils ca-certificates patchelf zstd
           sudo rm -rf /var/lib/apt/lists/*
+          df -h
 
       - name: Restore the compiled wheel
         uses: actions/download-artifact@v4
         with:
-          name: projectswift-sm86-wheel-${{ github.sha }}
+          name: ${{ inputs.reuse_artifact_name || format('projectswift-sm86-wheel-{0}', github.sha) }}
           path: ${{ runner.temp }}/torch-output
+          run-id: ${{ inputs.reuse_run_id || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Install and validate the custom wheel
         run: |
@@ -165,6 +184,9 @@ jobs:
           torch_wheel="$(find "${RUNNER_TEMP}/torch-output" -maxdepth 1 -type f -name '*.whl')"
           python -m venv "${RUNNER_TEMP}/build-venv"
           "${RUNNER_TEMP}/build-venv/bin/python" -m pip install --upgrade pip
+          "${RUNNER_TEMP}/build-venv/bin/python" -m pip install \
+            --no-deps \
+            -r requirements-cuda13-runtime.in
           "${RUNNER_TEMP}/build-venv/bin/python" -m pip install "${torch_wheel}"
           "${RUNNER_TEMP}/build-venv/bin/python" -m pip install -r requirements-projectswift.in
           "${RUNNER_TEMP}/build-venv/bin/python" scripts/verify_torch_build.py
@@ -173,7 +195,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p build/wheelhouse
-          cp "${RUNNER_TEMP}/torch-output/"*.whl build/wheelhouse/
+          ln "${RUNNER_TEMP}/torch-output/"*.whl build/wheelhouse/
           "${RUNNER_TEMP}/build-venv/bin/python" - <<'PY' > build/requirements-projectswift.lock
           import json
           import subprocess
@@ -189,10 +211,12 @@ jobs:
           PY
           "${RUNNER_TEMP}/build-venv/bin/python" -m pip download \
             --only-binary=:all: \
+            --no-deps \
             --dest build/wheelhouse \
             --find-links build/wheelhouse \
             -r build/requirements-projectswift.lock
           "${RUNNER_TEMP}/build-venv/bin/python" scripts/release_metadata.py inventory build/inventory
+          rm -rf "${RUNNER_TEMP}/build-venv"
 
       - name: Build lean source and runtime archives
         run: |
@@ -201,12 +225,12 @@ jobs:
           mkdir -p "$stage" dist
           python scripts/package_lean_source.py . "$stage/comfyui"
           cp build/requirements-projectswift.lock "$stage/requirements-projectswift.lock"
-          cp -a build/wheelhouse "$stage/wheelhouse"
+          cp -al build/wheelhouse "$stage/wheelhouse"
           cp build/inventory/license-inventory.json "$stage/license-inventory.json"
           cp build/inventory/sbom.cdx.json "$stage/sbom.cdx.json"
           cp build/inventory/license-inventory.json dist/license-inventory.json
           cp build/inventory/sbom.cdx.json dist/sbom.cdx.json
-          cp "${RUNNER_TEMP}/torch-output/"*.whl dist/
+          ln "${RUNNER_TEMP}/torch-output/"*.whl dist/
 
           source_asset="projectswift-comfyui-image-source-${RELEASE_TAG}.tar.zst"
           runtime_asset="projectswift-comfyui-image-py312-cu130-sm86-${RELEASE_TAG}.tar.zst"
@@ -222,12 +246,14 @@ jobs:
           python -m venv "${RUNNER_TEMP}/verify-venv"
           "${RUNNER_TEMP}/verify-venv/bin/python" -m pip install \
             --no-index \
+            --no-deps \
             --find-links "$bundle_root/wheelhouse" \
             -r "$bundle_root/requirements-projectswift.lock"
           "${RUNNER_TEMP}/verify-venv/bin/python" "$bundle_root/comfyui/scripts/verify_lean_runtime.py"
           "${RUNNER_TEMP}/verify-venv/bin/python" "$bundle_root/comfyui/main.py" \
             --cpu --quick-test-for-ci --disable-api-nodes --disable-metadata \
             --front-end-root "$bundle_root/comfyui/web_empty"
+          rm -rf "${RUNNER_TEMP}/verify-venv"
 
       - name: Measure the current filtered baseline
         run: |

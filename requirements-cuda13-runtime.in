@@ -1,0 +1,8 @@
+# CUDA 13 shared libraries not embedded in the ProjectSwift PyTorch wheel.
+# Versions match the official torch 2.10.0+cu130 Linux wheel metadata.
+nvidia-cufft==12.0.0.61
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
+nvidia-cusparse==12.6.3.3
+nvidia-nvjitlink==13.0.88
+nvidia-nvtx==13.0.85
